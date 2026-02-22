@@ -1,0 +1,182 @@
+// ─────────────────────────────────────────────────────────────
+//  NoteStack — Jenkins CI/CD Pipeline
+//  Author: Arkan Tandel
+//  Stages: Checkout → Pre-Check → Test → Build → Deploy
+// ─────────────────────────────────────────────────────────────
+
+pipeline {
+  agent any
+
+  environment {
+    BACKEND_IMAGE  = "notestack-backend"
+    FRONTEND_IMAGE = "notestack-frontend"
+    IMAGE_TAG      = "${env.BUILD_NUMBER}"
+    COMPOSE_FILE   = "docker-compose.yml"
+  }
+
+  options {
+    timestamps()
+    timeout(time: 20, unit: 'MINUTES')
+    disableConcurrentBuilds()
+    buildDiscarder(logRotator(numToKeepStr: '10'))
+  }
+
+  stages {
+
+    // ── STAGE 1 — CHECKOUT ────────────────────────────────
+    stage('Checkout') {
+      steps {
+        echo "Pulling latest code from GitHub..."
+        git branch: 'main',
+            url: 'https://github.com/arkantandel/notes-app.git'
+        echo "Checked out commit: ${env.GIT_COMMIT?.take(8)}"
+      }
+    }
+
+    // ── STAGE 2 — ENVIRONMENT CHECK ───────────────────────
+    stage('Environment Check') {
+      steps {
+        echo "Verifying tools are available..."
+        sh 'docker --version'
+        sh 'docker buildx version'
+        sh 'docker compose version'
+        sh 'python3 --version'
+        sh 'echo "Docker socket check:" && docker ps -q | wc -l'
+      }
+    }
+
+    // ── STAGE 3 — INSTALL & TEST ──────────────────────────
+    stage('Test Backend') {
+      steps {
+        echo "Installing dependencies and running test suite..."
+        dir('backend') {
+          sh 'pip install -r requirements.txt --break-system-packages -q'
+        }
+        sh 'python3 -m pytest tests/ -v --tb=short'
+      }
+      post {
+        failure {
+          echo "Tests failed — blocking build. Fix failing tests before merging."
+        }
+        success {
+          echo "All tests passed."
+        }
+      }
+    }
+
+    // ── STAGE 4 — BUILD IMAGES ────────────────────────────
+    stage('Build Docker Images') {
+      parallel {
+
+        stage('Build Backend') {
+          steps {
+            echo "Building backend image..."
+            dir('backend') {
+              sh """
+                docker buildx build \
+                  --platform linux/amd64 \
+                  -t ${BACKEND_IMAGE}:${IMAGE_TAG} \
+                  -t ${BACKEND_IMAGE}:latest \
+                  --load \
+                  .
+              """
+            }
+            echo "Backend image built: ${BACKEND_IMAGE}:${IMAGE_TAG}"
+          }
+        }
+
+        stage('Build Frontend') {
+          steps {
+            echo "Building frontend image..."
+            dir('frontend') {
+              sh """
+                docker buildx build \
+                  --platform linux/amd64 \
+                  -t ${FRONTEND_IMAGE}:${IMAGE_TAG} \
+                  -t ${FRONTEND_IMAGE}:latest \
+                  --load \
+                  .
+              """
+            }
+            echo "Frontend image built: ${FRONTEND_IMAGE}:${IMAGE_TAG}"
+          }
+        }
+
+      }
+    }
+
+    // ── STAGE 5 — DEPLOY ──────────────────────────────────
+    stage('Deploy') {
+      steps {
+        echo "Deploying stack with Docker Compose..."
+        sh '''
+          docker compose down --remove-orphans || true
+          docker compose up -d --force-recreate
+        '''
+        echo "Waiting for services to become healthy..."
+        sh 'sleep 8'
+        sh 'docker compose ps'
+      }
+      post {
+        success {
+          echo "Deployment successful!"
+          echo "Frontend → http://localhost:8080"
+          echo "Backend  → http://localhost:5000"
+        }
+        failure {
+          echo "Deployment failed — rolling back..."
+          sh 'docker compose down || true'
+        }
+      }
+    }
+
+    // ── STAGE 6 — HEALTH CHECK ────────────────────────────
+    stage('Health Check') {
+      steps {
+        echo "Running post-deployment health checks..."
+        sh '''
+          sleep 5
+          curl -f http://localhost:5000/health || exit 1
+          echo "Backend health check passed."
+          curl -f http://localhost:8080/health || exit 1
+          echo "Frontend health check passed."
+        '''
+      }
+    }
+
+    // ── STAGE 7 — CLEANUP ─────────────────────────────────
+    stage('Cleanup') {
+      steps {
+        echo "Cleaning up dangling images to save disk space..."
+        sh 'docker image prune -f'
+      }
+    }
+
+  }
+
+  // ── POST ACTIONS ──────────────────────────────────────────
+  post {
+    success {
+      echo """
+      ✅ ───────────────────────────────────────────
+         PIPELINE SUCCEEDED — Build #${env.BUILD_NUMBER}
+         Commit : ${env.GIT_COMMIT?.take(8)}
+         Frontend: http://localhost:8080
+         Backend : http://localhost:5000/health
+      ─────────────────────────────────────────────
+      """
+    }
+    failure {
+      echo """
+      ❌ ───────────────────────────────────────────
+         PIPELINE FAILED — Build #${env.BUILD_NUMBER}
+         Check console output for details.
+      ─────────────────────────────────────────────
+      """
+    }
+    always {
+      echo "Pipeline finished. Duration: ${currentBuild.durationString}"
+    }
+  }
+
+}
