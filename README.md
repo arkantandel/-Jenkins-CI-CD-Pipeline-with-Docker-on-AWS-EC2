@@ -359,6 +359,3 @@ docker buildx version
   <img src="https://capsule-render.vercel.app/api?type=waving&color=0:00c6ff,50:243B55,100:141E30&height=120&section=footer"/>
 </p>
 
-<p align="center">
-  Built with ❤️ by <strong>Arkan Tandel</strong> — DevOps Engineer
-</p>
